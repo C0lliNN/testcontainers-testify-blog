@@ -5,68 +5,61 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var client *mongo.Client
-
-func setupTest(t *testing.T) {
-	t.Helper()
-	ctx := context.Background()
-
-	// Only create a new client if we don't have one yet
-	if client == nil {
-		mongodbContainer, err := mongodb.RunContainer(ctx, testcontainers.WithImage("mongo:6"))
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		mongodbPort, err := mongodbContainer.MappedPort(ctx, "27017")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		mongodbHost, err := mongodbContainer.Host(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		client, err = mongo.NewClient(options.Client().ApplyURI(fmt.Sprintf("mongodb://%s:%s", mongodbHost, mongodbPort.Port())))
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		err = client.Connect(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		t.Cleanup(func() {
-			err = mongodbContainer.Terminate(ctx);
-			if err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-
-	t.Cleanup(func() {
-		// Delete the database after the test is done to make sure we have a clean state
-		err := client.Database(database).Drop(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		
-	})
+type ContactRepositorySuite struct {
+	suite.Suite
+	client *mongo.Client
+	container *mongodb.MongoDBContainer
+	repo *ContactRepository
 }
 
-func TestContactRepository_Save(t *testing.T) {
-	setupTest(t)
-
+func (s *ContactRepositorySuite) SetupSuite() {
 	ctx := context.Background()
-	repo := NewContactRepository(client)
+
+	var err error
+	s.container, err = mongodb.RunContainer(ctx, testcontainers.WithImage("mongo:6"))
+	s.Require().NoError(err)
+
+	mongodbPort, err := s.container.MappedPort(ctx, "27017")
+	s.Require().NoError(err)
+
+	mongodbHost, err := s.container.Host(ctx)
+	s.Require().NoError(err)
+
+	s.client, err = mongo.NewClient(options.Client().ApplyURI(fmt.Sprintf("mongodb://%s:%s", mongodbHost, mongodbPort.Port())))
+	s.Require().NoError(err)
+
+	err = s.client.Connect(ctx)
+	s.Require().NoError(err)
+
+	s.repo = NewContactRepository(s.client)
+}
+
+func (s *ContactRepositorySuite) TearDownSuite() {
+	ctx := context.Background()
+	
+	err := s.client.Disconnect(ctx)
+	s.Require().NoError(err)
+
+	err = s.container.Terminate(ctx)
+	s.Require().NoError(err)
+}
+
+func (s *ContactRepositorySuite) TearDownTest() {
+	ctx := context.Background()
+
+	err := s.client.Database(database).Drop(ctx)
+	s.Require().NoError(err)
+}
+
+func (s *ContactRepositorySuite) TestSave() {
+	ctx := context.Background()
 
 	contact := &Contact{
 		Name: "John Doe",
@@ -74,21 +67,16 @@ func TestContactRepository_Save(t *testing.T) {
 		Email: "test@test.com",
 	}
 
-	err := repo.Save(ctx, contact)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err := s.repo.Save(ctx, contact)
+	s.Require().NoError(err)
 
-	if contact.ID == "" {
-		t.Error("Expected ID to be set")
-	}
+	s.NotEmpty(contact.ID)
 
-	persistedContact, err := repo.FindByID(ctx, contact.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	persistedContact, err := s.repo.FindByID(ctx, contact.ID)
+	s.Require().NoError(err)
+	s.Equal(contact, persistedContact)
+}
 
-	if persistedContact != contact {
-		t.Error("Expected contact to be persisted")
-	}
+func TestContactRepositorySuite(t *testing.T) {
+	suite.Run(t, new(ContactRepositorySuite))
 }
